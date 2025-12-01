@@ -1,13 +1,11 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import { analyzeProfile } from './services/geminiService';
 import { AnalysisResult, AnalysisStatus } from './types';
 import AnalysisDashboard from './components/AnalysisDashboard';
-import { Sparkles, ArrowRight, Loader2, Share2, Image as ImageIcon, X, FileJson, Upload, HelpCircle, Copy, Check, Terminal, ExternalLink } from 'lucide-react';
+import { Sparkles, Loader2, Image as ImageIcon, X, FileJson, HelpCircle, Copy, ExternalLink, Filter, ChevronsDown, AlertTriangle, AlertCircle, FolderInput, Trash2, Database, Terminal, Calculator, Fingerprint } from 'lucide-react';
 
-// Default example text from user prompt for demo purposes
-const DEFAULT_INPUT = `（不要写代码）我想在小红书和抖音做自媒体，分析一下我的账户：
-我在小红书收获了3.5万次赞与收藏，来看看我的主页>> https://xhslink.com/m/3YKEMSeFMsc
-0- 长按复制此条消息，打开抖音搜索，查看TA的更多作品。 https://v.douyin.com/Mws-VSOV6Fg/`;
+// Default input is now empty to avoid user confusion
+const DEFAULT_INPUT = ``;
 
 function App() {
   const [inputText, setInputText] = useState(DEFAULT_INPUT);
@@ -18,6 +16,48 @@ function App() {
   const [showGuide, setShowGuide] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const jsonInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+
+  // Analyze the input text to show a live summary of what's been imported
+  const dataSummary = useMemo(() => {
+    const spiderMatch = inputText.match(/--- (?:BATCH )?IMPORTED SPIDER_XHS DATA(?: \(\d+ notes\))? ---/);
+    const noteMatches = inputText.match(/--- NOTE: .+? ---/g);
+    const jsonMatches = inputText.match(/"liked_count":/g); // Rough heuristic for meaningful JSON records
+
+    if (!spiderMatch && !noteMatches && !jsonMatches) return null;
+
+    return {
+      source: spiderMatch ? 'Spider_XHS 爬虫数据' : '自定义 JSON 数据',
+      noteCount: noteMatches ? noteMatches.length : (jsonMatches ? jsonMatches.length : 0),
+      hasMetrics: !!jsonMatches
+    };
+  }, [inputText]);
+
+  // Helper to clean useless fields from Spider_XHS data
+  const cleanSpiderData = (jsonString: string) => {
+    try {
+      const data = JSON.parse(jsonString);
+      // Fields to remove as requested by user to reduce noise
+      const keysToRemove = [
+        'xsec_token', 
+        'user_id', 
+        'video_addr', 
+        'image_list', 
+        'avatar', 
+        'home_url', 
+        'video_cover',
+        'sec_token', 
+        'note_id',
+        'note_url'
+      ];
+      
+      keysToRemove.forEach(key => delete data[key]);
+      return JSON.stringify(data);
+    } catch (e) {
+      // If it's not valid JSON, return as is
+      return jsonString;
+    }
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -43,9 +83,9 @@ function App() {
         reader.onload = (event) => {
           try {
             const content = event.target?.result as string;
-            // Validate if it looks like JSON
-            JSON.parse(content); 
-            combinedData += `\n\n--- FILE: ${file.name} ---\n${content}`;
+            // Validate and clean JSON
+            const cleanedContent = cleanSpiderData(content);
+            combinedData += `\n\n--- FILE: ${file.name} ---\n${cleanedContent}`;
           } catch (err) {
             combinedData += `\n\n--- FILE: ${file.name} (Raw Text) ---\n${event.target?.result}`;
           }
@@ -62,9 +102,63 @@ function App() {
     }
   };
 
+  const handleFolderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      const files: File[] = Array.from(e.target.files);
+      
+      // Filter only info.json files from the massive list of files in the folder structure
+      const infoFiles = files.filter(f => f.name === 'info.json');
+
+      if (infoFiles.length === 0) {
+        alert("在选定的文件夹中未找到 'info.json' 文件。请确保您选择了 Spider_XHS 的输出目录（通常是 'datas' 或 'download'）。");
+        return;
+      }
+
+      let combinedData = "";
+      let processedCount = 0;
+
+      infoFiles.forEach(file => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          try {
+            const content = event.target?.result as string;
+            // Try to extract the folder name (usually the note title) from the path
+            // webkitRelativePath is like "Download/Note_Title_ID/info.json"
+            // @ts-ignore
+            const pathParts = file.webkitRelativePath ? file.webkitRelativePath.split('/') : [];
+            const parentFolder = pathParts.length > 1 ? pathParts[pathParts.length - 2] : "Unknown Note";
+
+            const cleanedContent = cleanSpiderData(content);
+            combinedData += `\n\n--- NOTE: ${parentFolder} ---\n${cleanedContent}`;
+          } catch (err) {
+            console.error("Error parsing file", file.name);
+          }
+          
+          processedCount++;
+          if (processedCount === infoFiles.length) {
+             setInputText(prev => {
+                const separator = prev.trim() ? "\n\n" : "";
+                return prev + separator + `--- BATCH IMPORTED SPIDER_XHS DATA (${infoFiles.length} notes) ---` + combinedData;
+             });
+          }
+        };
+        reader.readAsText(file);
+      });
+    }
+  };
+
   const removeImage = (index: number) => {
     setImages(prev => prev.filter((_, i) => i !== index));
   };
+
+  const clearAll = () => {
+    if (window.confirm("确定要清空所有文本和图片吗？")) {
+      setInputText("");
+      setImages([]);
+      setResult(null);
+      setError(null);
+    }
+  }
 
   const handleAnalyze = async () => {
     if (!inputText.trim() && images.length === 0) return;
@@ -73,265 +167,317 @@ function App() {
     setError(null);
     
     try {
-      const data = await analyzeProfile(inputText, images);
+      // Clean input from user prompt artifacts
+      const cleanedInput = inputText.replace(/（不要写代码）|\(不要写代码\)/g, "");
+      const data = await analyzeProfile(cleanedInput, images);
       setResult(data);
       setStatus(AnalysisStatus.SUCCESS);
     } catch (err) {
       console.error(err);
-      setError("Unable to complete analysis. Please check your API key and try again.");
+      setError("分析未能完成。请检查您的输入数据是否清晰，或重试。");
       setStatus(AnalysisStatus.ERROR);
     }
   };
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] text-slate-900 pb-20">
-      {/* Navbar */}
-      <nav className="bg-white border-b border-slate-200 sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <div className="bg-gradient-to-tr from-pink-500 to-violet-600 p-2 rounded-lg text-white">
-              <Sparkles size={20} />
-            </div>
-            <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-pink-600 to-violet-600">
-              CreatorMind
-            </span>
+    <div className="min-h-screen bg-slate-50 font-sans text-slate-900 selection:bg-indigo-100 selection:text-indigo-900">
+      <style>
+        {`
+          @media print {
+            .no-print, .no-print * {
+              display: none !important;
+            }
+            body, html {
+              background: white;
+              height: auto !important;
+              overflow: visible !important;
+            }
+            .print-content {
+              margin: 0;
+              padding: 0;
+              overflow: visible !important;
+            }
+          }
+        `}
+      </style>
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+        {/* Header - Hide on print */}
+        <div className="text-center mb-12 animate-fade-in-down no-print">
+          <div className="inline-flex items-center justify-center p-3 bg-white rounded-2xl shadow-sm mb-6 border border-slate-100">
+            <span className="text-3xl mr-3">🚀</span>
+            <h1 className="text-3xl font-extrabold tracking-tight text-slate-900">
+              Social Media <span className="text-indigo-600">Architect</span>
+            </h1>
           </div>
-          <div className="flex items-center space-x-4">
-            <a href="#" className="text-sm font-medium text-slate-500 hover:text-slate-900">How it works</a>
-            <a href="#" className="text-sm font-medium text-slate-500 hover:text-slate-900">Examples</a>
-            <button className="bg-slate-900 text-white px-4 py-2 rounded-full text-sm font-medium hover:bg-slate-800 transition">
-              Sign In
-            </button>
-          </div>
-        </div>
-      </nav>
-
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        {/* Hero Section */}
-        <div className="text-center max-w-3xl mx-auto mb-16">
-          <h1 className="text-4xl md:text-5xl font-extrabold text-slate-900 tracking-tight mb-6">
-            Unlock your <span className="text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-violet-500">Social Potential</span>
-          </h1>
-          <p className="text-lg text-slate-600 mb-8">
-            Paste your bio, links OR <strong>raw JSON data</strong> from tools like Spider_XHS. <br className="hidden md:block"/>
-            Our AI analyzes your metrics and aesthetics to provide a tailored strategy.
+          <p className="mt-2 max-w-2xl mx-auto text-lg text-slate-600">
+            AI 驱动的小红书与抖音账号深度诊断工具
           </p>
+          <button 
+            onClick={() => setShowGuide(true)}
+            className="mt-4 inline-flex items-center text-sm text-indigo-600 hover:text-indigo-800 font-medium transition-colors"
+          >
+            <HelpCircle className="w-4 h-4 mr-1" />
+            如何获取数据？(新手指南)
+          </button>
         </div>
 
-        {/* Input Area */}
-        <div className="max-w-4xl mx-auto mb-16 relative z-10">
-          <div className="bg-white rounded-3xl shadow-xl shadow-slate-200/50 p-2 ring-1 ring-slate-100">
-            <div className="relative">
+        {/* Main Input Section - Hide on print */}
+        <div className="max-w-4xl mx-auto space-y-6 no-print">
+          <div className="bg-white rounded-3xl shadow-xl shadow-slate-200/50 border border-slate-100 overflow-hidden transition-all duration-300 hover:shadow-2xl hover:shadow-indigo-100/50">
+            
+            {/* Data Summary Banner */}
+            {dataSummary && (
+              <div className="bg-emerald-50 px-6 py-3 border-b border-emerald-100 flex items-center justify-between">
+                <div className="flex items-center text-emerald-800 text-sm font-medium">
+                  <Database className="w-4 h-4 mr-2" />
+                  <span>
+                    检测到 <strong>{dataSummary.noteCount} 篇笔记</strong>，来源：{dataSummary.source}。
+                    {dataSummary.hasMetrics && " 包含互动数据。"}
+                  </span>
+                </div>
+                <div className="text-xs text-emerald-600 hidden sm:block">
+                  AI 将分析标题、标签和数据表现。
+                </div>
+              </div>
+            )}
+
+            <div className="p-1 relative">
               <textarea
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
-                placeholder="Paste your profile intro, links, or JSON data from crawler tools here..."
-                className="w-full min-h-[160px] p-6 text-lg text-slate-700 placeholder:text-slate-400 bg-transparent border-none focus:ring-0 resize-none rounded-2xl font-mono text-sm md:text-lg"
+                placeholder="请描述您的账号，或者使用下方按钮导入 Spider_XHS 的数据文件夹..."
+                className="w-full h-48 p-6 text-lg text-slate-700 placeholder-slate-400 bg-transparent border-none resize-none focus:ring-0 focus:outline-none font-mono text-sm leading-relaxed"
               />
               
-              {/* Image Previews */}
-              {images.length > 0 && (
-                <div className="px-6 pb-4 flex flex-wrap gap-3">
-                  {images.map((img, idx) => (
-                    <div key={idx} className="relative group">
-                      <img src={img} alt="preview" className="w-20 h-20 object-cover rounded-lg border border-slate-200" />
-                      <button 
-                        onClick={() => removeImage(idx)}
-                        className="absolute -top-2 -right-2 bg-slate-800 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        <X size={12} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="flex flex-col md:flex-row items-center justify-between px-6 pb-4 pt-2 gap-4 md:gap-0">
-                <div className="flex items-center space-x-3 w-full md:w-auto overflow-x-auto pb-2 md:pb-0">
-                  {/* Screenshot Button */}
-                  <button 
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex-shrink-0 flex items-center space-x-2 px-4 py-2 rounded-lg bg-slate-50 text-slate-600 hover:bg-slate-100 transition-colors border border-slate-200 text-sm font-medium"
-                  >
-                    <ImageIcon className="w-4 h-4" />
-                    <span>Screenshots</span>
-                  </button>
-                  <input 
-                    type="file" 
-                    ref={fileInputRef} 
-                    onChange={handleFileChange} 
-                    className="hidden" 
-                    accept="image/*" 
-                    multiple 
-                  />
-
-                  {/* JSON Button */}
-                  <div className="flex items-center space-x-2">
-                    <button 
-                      onClick={() => jsonInputRef.current?.click()}
-                      className="flex-shrink-0 flex items-center space-x-2 px-4 py-2 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors border border-indigo-200 text-sm font-medium"
-                    >
-                      <FileJson className="w-4 h-4" />
-                      <span>Upload Spider Data</span>
-                    </button>
-                     <button
-                        onClick={() => setShowGuide(true)}
-                        className="p-2 text-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-full transition-colors"
-                        title="How to get JSON data?"
-                      >
-                        <HelpCircle className="w-5 h-5" />
-                      </button>
-                  </div>
-                  <input 
-                    type="file" 
-                    ref={jsonInputRef} 
-                    onChange={handleJsonChange} 
-                    className="hidden" 
-                    accept=".json,application/json" 
-                    multiple 
-                  />
-
-                  <div className="h-6 w-px bg-slate-200 mx-2 flex-shrink-0"></div>
-                  <span className="flex-shrink-0 inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-red-50 text-red-600 border border-red-100">
-                    <Share2 className="w-3 h-3 mr-1" /> XHS
-                  </span>
-                  <span className="flex-shrink-0 inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-slate-900 text-white border border-slate-700">
-                    <svg className="w-3 h-3 mr-1" viewBox="0 0 24 24" fill="currentColor"><path d="M19.589 6.686a4.793 4.793 0 0 1-3.77-4.245V2h-3.445v13.672a2.896 2.896 0 0 1-5.201 1.743l-.002-.001.002.001a2.895 2.895 0 0 1 3.183-4.51v-3.5a6.393 6.393 0 0 0-5.394 10.137 6.393 6.393 0 0 0 10.857-4.424V8.687a8.188 8.188 0 0 0 4.08 1.07v-3.42c-.056.01-.113.016-.17.023-.095.013-.19.022-.286.028-.396.025-.795.035-1.196.028l.342.27c0 .001.002.002.002.002z"/></svg>
-                    Douyin
-                  </span>
-                </div>
-
-                <button
-                  onClick={handleAnalyze}
-                  disabled={status === AnalysisStatus.LOADING || (!inputText.trim() && images.length === 0)}
-                  className={`w-full md:w-auto flex justify-center items-center space-x-2 px-6 py-3 rounded-xl font-semibold text-white transition-all duration-200 ${
-                    status === AnalysisStatus.LOADING || (!inputText.trim() && images.length === 0)
-                      ? 'bg-slate-300 cursor-not-allowed'
-                      : 'bg-slate-900 hover:bg-slate-800 shadow-lg hover:shadow-slate-900/20 active:scale-95'
-                  }`}
+              {/* Floating Clear Button */}
+              {inputText.length > 0 && (
+                <button 
+                  onClick={clearAll}
+                  className="absolute top-4 right-4 p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-colors"
+                  title="清空所有内容"
                 >
-                  {status === AnalysisStatus.LOADING ? (
-                    <>
-                      <Loader2 className="animate-spin w-5 h-5" />
-                      <span>Analyzing...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="w-5 h-5" />
-                      <span>Analyze Profile</span>
-                    </>
-                  )}
+                  <Trash2 size={18} />
                 </button>
+              )}
+            </div>
+
+            {/* Image Preview Area */}
+            {images.length > 0 && (
+              <div className="px-6 pb-4 flex flex-wrap gap-4">
+                {images.map((img, index) => (
+                  <div key={index} className="relative group">
+                    <img 
+                      src={img} 
+                      alt={`Upload ${index + 1}`} 
+                      className="w-24 h-24 object-cover rounded-xl border-2 border-slate-100 shadow-sm"
+                    />
+                    <button
+                      onClick={() => removeImage(index)}
+                      className="absolute -top-2 -right-2 bg-white text-rose-500 rounded-full p-1 shadow-md border border-slate-100 opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))}
               </div>
+            )}
+
+            {/* Toolbar */}
+            <div className="bg-slate-50/50 px-6 py-4 flex flex-wrap gap-2 items-center justify-between border-t border-slate-100">
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex items-center px-4 py-2 rounded-xl text-sm font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 hover:text-indigo-600 transition-all shadow-sm"
+                >
+                  <ImageIcon className="w-4 h-4 mr-2" />
+                  添加截图
+                </button>
+                <button
+                  onClick={() => jsonInputRef.current?.click()}
+                  className="inline-flex items-center px-4 py-2 rounded-xl text-sm font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 hover:text-emerald-600 transition-all shadow-sm"
+                >
+                  <FileJson className="w-4 h-4 mr-2" />
+                  导入 JSON
+                </button>
+                <button
+                  onClick={() => folderInputRef.current?.click()}
+                  className="inline-flex items-center px-4 py-2 rounded-xl text-sm font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 hover:text-amber-600 transition-all shadow-sm ring-2 ring-amber-100"
+                >
+                  <FolderInput className="w-4 h-4 mr-2" />
+                  批量导入文件夹
+                </button>
+                
+                {/* Hidden Inputs */}
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFileChange}
+                  className="hidden"
+                  accept="image/*"
+                  multiple
+                />
+                 <input
+                  type="file"
+                  ref={jsonInputRef}
+                  onChange={handleJsonChange}
+                  className="hidden"
+                  accept=".json"
+                  multiple
+                />
+                <input
+                  type="file"
+                  ref={folderInputRef}
+                  onChange={handleFolderChange}
+                  className="hidden"
+                  // @ts-ignore - directory attributes are non-standard but supported by modern browsers
+                  webkitdirectory="" 
+                  directory="" 
+                  multiple
+                />
+              </div>
+              
+              <button
+                onClick={handleAnalyze}
+                disabled={status === AnalysisStatus.LOADING || (!inputText.trim() && images.length === 0)}
+                className={`
+                  inline-flex items-center px-6 py-2.5 rounded-xl text-sm font-semibold text-white shadow-lg shadow-indigo-500/30 transition-all
+                  ${status === AnalysisStatus.LOADING 
+                    ? 'bg-indigo-400 cursor-not-allowed' 
+                    : 'bg-indigo-600 hover:bg-indigo-700 hover:scale-105 active:scale-95'
+                  }
+                `}
+              >
+                {status === AnalysisStatus.LOADING ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    正在分析...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4 mr-2" />
+                    生成策略报告
+                  </>
+                )}
+              </button>
             </div>
           </div>
           
-          {/* Quick tips under input */}
-          <div className="mt-4 flex flex-wrap justify-center gap-4 md:gap-6 text-sm text-slate-400">
-             <span className="flex items-center"><ArrowRight className="w-3 h-3 mr-1" /> Paste share links</span>
-             <span className="flex items-center"><ArrowRight className="w-3 h-3 mr-1" /> <strong>Upload Screenshots</strong></span>
-             <span className="flex items-center text-indigo-500 font-medium"><Upload className="w-3 h-3 mr-1" /> Upload <strong>info.json</strong> from Spider_XHS</span>
-          </div>
-        </div>
-
-        {/* Guide Modal */}
-        {showGuide && (
-          <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl animate-fade-in-up">
-              <div className="p-6 border-b border-slate-100 flex justify-between items-center sticky top-0 bg-white z-10">
-                <div className="flex items-center space-x-2">
-                  <Terminal className="text-indigo-600" size={24} />
-                  <h3 className="text-xl font-bold text-slate-900">How to use Spider_XHS</h3>
-                </div>
-                <button onClick={() => setShowGuide(false)} className="text-slate-400 hover:text-slate-600 p-1">
-                  <X size={24} />
-                </button>
-              </div>
-              <div className="p-6 space-y-6">
-                <p className="text-slate-600">
-                  Spider_XHS is a Python tool that scrapes detailed metrics from Xiaohongshu. Follow these steps to generate the <code>json</code> file needed for this app.
-                </p>
-                
-                <div className="space-y-4">
-                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
-                    <h4 className="font-semibold text-slate-800 mb-2 flex items-center"><span className="bg-slate-200 text-slate-600 w-6 h-6 rounded-full flex items-center justify-center text-xs mr-2">1</span> Prerequisites</h4>
-                    <p className="text-sm text-slate-600 mb-2">Install Python 3.7+ and Node.js (for decryption).</p>
-                    <div className="flex space-x-4">
-                       <a href="https://www.python.org/downloads/" target="_blank" className="text-indigo-600 text-xs font-medium flex items-center hover:underline"><ExternalLink size={12} className="mr-1"/> Python</a>
-                       <a href="https://nodejs.org/" target="_blank" className="text-indigo-600 text-xs font-medium flex items-center hover:underline"><ExternalLink size={12} className="mr-1"/> Node.js</a>
-                    </div>
-                  </div>
-
-                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
-                    <h4 className="font-semibold text-slate-800 mb-2 flex items-center"><span className="bg-slate-200 text-slate-600 w-6 h-6 rounded-full flex items-center justify-center text-xs mr-2">2</span> Setup</h4>
-                    <ul className="text-sm text-slate-600 space-y-2 list-disc list-inside">
-                      <li>Download the project code from GitHub.</li>
-                      <li>Open a terminal in the project folder.</li>
-                      <li>Run <code className="bg-white px-1 py-0.5 rounded border border-slate-200">pip install -r requirements.txt</code></li>
-                      <li>Run <code className="bg-white px-1 py-0.5 rounded border border-slate-200">npm install</code></li>
-                    </ul>
-                  </div>
-
-                  <div className="bg-amber-50 p-4 rounded-xl border border-amber-100">
-                    <h4 className="font-semibold text-amber-800 mb-2 flex items-center"><span className="bg-amber-200 text-amber-800 w-6 h-6 rounded-full flex items-center justify-center text-xs mr-2">3</span> Get Cookie (Critical)</h4>
-                    <ol className="text-sm text-amber-900/80 space-y-1 list-decimal list-inside">
-                      <li>Log in to <strong>xiaohongshu.com</strong> on Chrome.</li>
-                      <li>Press <strong>F12</strong> (Developer Tools) → Click <strong>Network</strong> tab.</li>
-                      <li>Refresh page. Click any request (e.g., <code className="text-xs">user/me</code>).</li>
-                      <li>In <strong>Headers</strong>, find <code className="font-bold">cookie:</code>. Copy the value.</li>
-                      <li>Create a <code className="font-bold">.env</code> file in the project folder:</li>
-                    </ol>
-                    <div className="mt-2 bg-white p-2 rounded border border-amber-200 text-xs font-mono text-slate-600 overflow-x-auto">
-                      COOKIES="your_copied_cookie_string_here"
-                    </div>
-                  </div>
-
-                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
-                    <h4 className="font-semibold text-slate-800 mb-2 flex items-center"><span className="bg-slate-200 text-slate-600 w-6 h-6 rounded-full flex items-center justify-center text-xs mr-2">4</span> Run & Upload</h4>
-                    <p className="text-sm text-slate-600 mb-2">Edit <code>main.py</code> to include your profile URL, then run:</p>
-                    <code className="block bg-slate-800 text-white px-3 py-2 rounded-lg text-xs font-mono mb-3">python main.py</code>
-                    <p className="text-sm text-slate-600">
-                      It will generate a <code>datas</code> folder. Upload the <code>info.json</code> file found there to this app!
-                    </p>
-                  </div>
-                </div>
-              </div>
-              <div className="p-4 bg-slate-50 border-t border-slate-100 rounded-b-2xl text-center">
-                <button onClick={() => setShowGuide(false)} className="text-sm font-semibold text-indigo-600 hover:text-indigo-700">
-                  Got it, I'm ready to upload
-                </button>
-              </div>
+          {error && (
+            <div className="bg-rose-50 border border-rose-100 text-rose-600 px-6 py-4 rounded-2xl flex items-center animate-shake">
+              <AlertCircle className="w-5 h-5 mr-3 flex-shrink-0" />
+              {error}
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
         {/* Results Area */}
-        <div className="max-w-6xl mx-auto">
-          {error && (
-             <div className="bg-red-50 border border-red-100 text-red-600 p-4 rounded-xl text-center mb-8">
-               {error}
-             </div>
-          )}
-          
-          {status === AnalysisStatus.SUCCESS && result && (
-             <AnalysisDashboard data={result} />
-          )}
+        <div className="mt-12">
+          {result && <AnalysisDashboard data={result} />}
+        </div>
+      </div>
 
-          {status === AnalysisStatus.IDLE && (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 opacity-60">
-               {[1, 2, 3].map((i) => (
-                 <div key={i} className="h-48 bg-white rounded-2xl border border-slate-100 shadow-sm p-6 flex flex-col justify-between">
-                    <div className="w-10 h-10 rounded-full bg-slate-100" />
-                    <div className="space-y-2">
-                       <div className="h-4 w-3/4 bg-slate-100 rounded" />
-                       <div className="h-4 w-1/2 bg-slate-100 rounded" />
+      {/* Guide Modal */}
+      {showGuide && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 no-print">
+          <div className="bg-white rounded-3xl max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl animate-scale-up">
+            <div className="p-6 border-b border-slate-100 flex justify-between items-center sticky top-0 bg-white z-10">
+              <h3 className="text-xl font-bold text-slate-900 flex items-center">
+                <Terminal className="w-6 h-6 mr-2 text-indigo-600" />
+                数据采集指南 (Spider_XHS)
+              </h3>
+              <button 
+                onClick={() => setShowGuide(false)}
+                className="p-2 hover:bg-slate-100 rounded-full text-slate-400 hover:text-slate-600 transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-8 space-y-8">
+              {/* Step 1 */}
+              <div className="relative pl-8 border-l-2 border-indigo-100">
+                <div className="absolute -left-[9px] top-0 w-4 h-4 rounded-full bg-indigo-600 border-4 border-white shadow-sm" />
+                <h4 className="text-lg font-bold text-slate-900 mb-2">1. 安装基础环境</h4>
+                <p className="text-slate-600 mb-4">你需要在电脑上安装 Python 和 Node.js。</p>
+                <div className="flex gap-4">
+                  <a href="https://www.python.org/downloads/" target="_blank" rel="noreferrer" className="flex items-center text-sm font-medium text-indigo-600 hover:underline bg-indigo-50 px-3 py-1.5 rounded-lg">
+                    下载 Python <ExternalLink className="w-3 h-3 ml-1" />
+                  </a>
+                  <a href="https://nodejs.org/" target="_blank" rel="noreferrer" className="flex items-center text-sm font-medium text-indigo-600 hover:underline bg-indigo-50 px-3 py-1.5 rounded-lg">
+                    下载 Node.js <ExternalLink className="w-3 h-3 ml-1" />
+                  </a>
+                </div>
+              </div>
+
+               {/* Step 2 */}
+               <div className="relative pl-8 border-l-2 border-indigo-100">
+                <div className="absolute -left-[9px] top-0 w-4 h-4 rounded-full bg-indigo-600 border-4 border-white shadow-sm" />
+                <h4 className="text-lg font-bold text-slate-900 mb-2">2. 获取 Cookie (最关键一步)</h4>
+                <div className="bg-slate-50 p-4 rounded-xl space-y-3 text-sm border border-slate-200">
+                  <p className="flex items-start"><span className="font-bold mr-2">1.</span> 用浏览器打开小红书网页版并登录。</p>
+                  <p className="flex items-start"><span className="font-bold mr-2">2.</span> 按下 <kbd className="px-1.5 py-0.5 rounded bg-white border border-slate-300 font-mono text-xs mx-1">F12</kbd> 打开开发者工具。</p>
+                  <p className="flex items-start"><span className="font-bold mr-2">3.</span> 点击顶部的 <strong>Network (网络)</strong> 标签。</p>
+                  <p className="flex items-start text-indigo-600 bg-indigo-50 p-2 rounded-lg">
+                    <Filter className="w-4 h-4 mr-1 inline" />
+                    <strong>过滤器:</strong> 选中 "Fetch/XHR" 或 "Doc" (不要看图片/Img)。
+                  </p>
+                  <p className="flex items-start"><span className="font-bold mr-2">4.</span> 刷新网页。在列表里随便点一个请求（例如以 <code>user</code> 或 <code>homefeed</code> 开头的）。</p>
+                  <p className="flex items-start text-indigo-600 bg-indigo-50 p-2 rounded-lg">
+                    <ChevronsDown className="w-4 h-4 mr-1 inline" />
+                    <strong>往下滚:</strong> 在右侧详情面板，使劲往下滚，找到 <strong>Request Headers (请求头)</strong>。
+                  </p>
+                  <p className="flex items-start"><span className="font-bold mr-2">5.</span> 找到 <strong>Cookie:</strong> 这一行，复制冒号后面那一长串字符。</p>
+                </div>
+              </div>
+
+               {/* Step 3 */}
+               <div className="relative pl-8 border-l-2 border-indigo-100">
+                <div className="absolute -left-[9px] top-0 w-4 h-4 rounded-full bg-indigo-600 border-4 border-white shadow-sm" />
+                <h4 className="text-lg font-bold text-slate-900 mb-2">3. 运行爬虫 & 上传数据</h4>
+                <div className="space-y-2 text-slate-600 text-sm">
+                   <p>1. 下载 <a href="https://github.com/cv-cat/Spider_XHS" target="_blank" className="text-indigo-600 hover:underline">Spider_XHS 项目代码</a> 并解压。</p>
+                   <p>2. 在文件夹里新建一个 <code>.env</code> 文件，填入：<code>COOKIES="你刚才复制的那一长串"</code>。</p>
+                   <p>3. 打开终端运行：<code>pip install -r requirements.txt</code> 然后 <code>python main.py</code>。</p>
+                   <p>4. 爬取完成后，点击本网页的 <strong>“批量导入文件夹”</strong>，选择生成的 <code>datas</code> 文件夹。</p>
+                </div>
+              </div>
+
+              {/* Troubleshooting */}
+              <div className="bg-rose-50 rounded-xl p-5 border border-rose-100">
+                 <h4 className="font-bold text-rose-700 flex items-center mb-3">
+                   <AlertTriangle className="w-5 h-5 mr-2" />
+                   常见报错解决 (Troubleshooting)
+                 </h4>
+                 <div className="space-y-4">
+                    <div className="bg-white p-3 rounded-lg border border-rose-100 shadow-sm">
+                      <p className="text-sm font-semibold text-rose-800 mb-1">报错: "ModuleNotFoundError: No module named 'execjs'"</p>
+                      <p className="text-xs text-slate-600 mb-2">这通常是因为你安装了多个 Python 版本，pip 安装到了错误的地方。</p>
+                      <div className="bg-slate-800 text-slate-200 p-2 rounded font-mono text-xs flex justify-between items-center group">
+                        <span>python -m pip install PyExecJS</span>
+                        <button 
+                          onClick={() => navigator.clipboard.writeText("python -m pip install PyExecJS")}
+                          className="opacity-0 group-hover:opacity-100 hover:text-white"
+                        >
+                          <Copy size={12} />
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1">使用 <code>python -m pip</code> 命令可以确保安装到当前运行的 Python 环境中。</p>
                     </div>
                  </div>
-               ))}
+              </div>
             </div>
-          )}
+            
+            <div className="p-6 border-t border-slate-100 bg-slate-50 rounded-b-3xl">
+              <button 
+                onClick={() => setShowGuide(false)}
+                className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl transition-colors shadow-lg shadow-indigo-200"
+              >
+                我明白了，开始分析！
+              </button>
+            </div>
+          </div>
         </div>
-      </main>
+      )}
     </div>
   );
 }
