@@ -81,7 +81,8 @@ npm run dev
 浏览器打开 http://localhost:5173 (或终端显示的地址) 即可使用。
 ```
 
-###📖 数据获取指南 (配合 Spider_XHS)
+📖 数据获取指南 (配合 Spider_XHS)
+---
 本工具最强大的用法是配合开源爬虫 Spider_XHS 使用，以获取您账号的全量数据。
 下载爬虫：前往 Spider_XHS 下载源码。
 获取 Cookie：
@@ -94,9 +95,12 @@ F12 打开控制台 -> Network -> 刷新 -> 找到请求头中的 cookie。
 点击本工具界面上的 "批量导入文件夹"。
 选择爬虫生成的 datas 文件夹。
 系统会自动读取所有子文件夹中的 info.json 并进行分析。
+
+🤝 贡献 (Contributing)
 ---
-###🤝 贡献 (Contributing)
 欢迎提交 Issue 或 Pull Request！
 如果您有更好的 Prompt 策略或新的功能想法（比如增加对 B站/知乎 的支持），请随时告诉我。
-###📄 开源协议 (License)
+
+📄 开源协议 (License)
+---
 MIT License © 2024 Your Name
