@@ -2,34 +2,43 @@ import React, { useState, useRef, useMemo } from 'react';
 import { analyzeProfile } from './services/geminiService';
 import { AnalysisResult, AnalysisStatus } from './types';
 import AnalysisDashboard from './components/AnalysisDashboard';
-import { Sparkles, Loader2, Image as ImageIcon, X, FileJson, HelpCircle, Copy, ExternalLink, Filter, ChevronsDown, AlertTriangle, AlertCircle, FolderInput, Trash2, Database, Terminal, Calculator, Fingerprint } from 'lucide-react';
+import { Sparkles, Loader2, Image as ImageIcon, X, FileJson, HelpCircle, Copy, ExternalLink, Filter, ChevronsDown, AlertTriangle, AlertCircle, FolderInput, Trash2, Database, Terminal, Calculator, Fingerprint, FileSpreadsheet, Download, Compass } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 // Default input is now empty to avoid user confusion
 const DEFAULT_INPUT = ``;
 
 function App() {
   const [inputText, setInputText] = useState(DEFAULT_INPUT);
+  const [userGoal, setUserGoal] = useState(""); // New state for user goal
   const [images, setImages] = useState<string[]>([]);
   const [status, setStatus] = useState<AnalysisStatus>(AnalysisStatus.IDLE);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showGuide, setShowGuide] = useState(false);
+  
+  // New state for the downloadable cleaned Excel file
+  const [downloadableData, setDownloadableData] = useState<any[] | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const jsonInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const excelInputRef = useRef<HTMLInputElement>(null);
 
   // Analyze the input text to show a live summary of what's been imported
   const dataSummary = useMemo(() => {
     const spiderMatch = inputText.match(/--- (?:BATCH )?IMPORTED SPIDER_XHS DATA(?: \(\d+ notes\))? ---/);
+    const excelMatch = inputText.match(/--- IMPORTED EXCEL DATA(?: \(All Columns\))? ---/);
     const noteMatches = inputText.match(/--- NOTE: .+? ---/g);
-    const jsonMatches = inputText.match(/"liked_count":/g); // Rough heuristic for meaningful JSON records
+    // Rough heuristic for meaningful JSON records or Excel array items
+    const recordMatches = inputText.match(/"(liked_count|display_title|title|desc|comment_content|Likes|Description|Note_title)"/g); 
 
-    if (!spiderMatch && !noteMatches && !jsonMatches) return null;
+    if (!spiderMatch && !noteMatches && !excelMatch && !recordMatches) return null;
 
     return {
-      source: spiderMatch ? 'Spider_XHS 爬虫数据' : '自定义 JSON 数据',
-      noteCount: noteMatches ? noteMatches.length : (jsonMatches ? jsonMatches.length : 0),
-      hasMetrics: !!jsonMatches
+      source: excelMatch ? 'Excel 表格数据' : (spiderMatch ? 'Spider_XHS 爬虫数据' : '自定义数据'),
+      noteCount: noteMatches ? noteMatches.length : (inputText.split('},{').length > 1 ? inputText.split('},{').length : 0),
+      hasMetrics: !!inputText.match(/"(liked_count|likes|interaction|Likes|Note_liked_count)"/i)
     };
   }, [inputText]);
 
@@ -102,6 +111,105 @@ function App() {
     }
   };
 
+  const handleExcelChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      
+      reader.onload = (event) => {
+        try {
+          const data = new Uint8Array(event.target?.result as ArrayBuffer);
+          const workbook = XLSX.read(data, { type: 'array' });
+          
+          // Get first sheet
+          const firstSheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[firstSheetName];
+          
+          // Convert to JSON (raw rows)
+          const rawRows = XLSX.utils.sheet_to_json(worksheet) as any[];
+
+          // --- 1. DOWNLOAD DATA (EXACT COPY, NO FILTERING) ---
+          setDownloadableData(rawRows);
+
+          // --- 2. GROUPING LOGIC (Structure optimization only) ---
+          // Even without filtering, we group rows by Note to prevent context window overflow
+          // from repeating note details 100 times for 100 comments.
+          
+          const notesMap = new Map<string, any>();
+
+          rawRows.forEach(row => {
+               // A. Try to find a grouping key (Note ID or Title)
+               // We look for common keys, favoring ID over Title
+               const noteKey = row['Note_note_id'] || row['note_id'] || row['id'] || row['Note_title'] || row['title'] || row['Title'] || row['Note_Title'];
+               
+               // If no grouping key found, we can't effectively group. 
+               // Treat as unique entry or fallback to index if needed, but let's use random for safety.
+               const validKey = noteKey ? String(noteKey) : `UNKNOWN_${Math.random()}`;
+
+               if (!notesMap.has(validKey)) {
+                   // --- New Note Entry ---
+                   // Strategy: Copy EVERYTHING from the row initially.
+                   // We will later add a "Comments_List" array for grouped comments.
+                   const noteEntry: any = { ...row };
+
+                   // Optional: If we are creating a list of comments, we might want to 
+                   // clear the "Comment" specific fields from the top-level object to reduce duplication,
+                   // BUT the user said "No Filtering", so we keep them in the top level as the "First Comment" context.
+                   // To avoid confusion, we initialize the array.
+                   noteEntry.Comments_List = [];
+                   
+                   notesMap.set(validKey, noteEntry);
+               }
+
+               // --- Extract Comment Data ---
+               // We look for columns that likely belong to comments (contain 'comment' or '评论')
+               const commentData: any = {};
+               let hasCommentData = false;
+
+               Object.keys(row).forEach(key => {
+                   if (key.toLowerCase().includes('comment') || key.includes('评论')) {
+                       commentData[key] = row[key];
+                       hasCommentData = true;
+                   }
+               });
+
+               // If this row has comment data, append it to the note's comment list
+               if (hasCommentData) {
+                   notesMap.get(validKey).Comments_List.push(commentData);
+               }
+          });
+
+          // Convert grouped map back to array
+          const groupedData = Array.from(notesMap.values());
+          const jsonString = JSON.stringify(groupedData, null, 2);
+            
+          setInputText(prev => {
+                const separator = prev.trim() ? "\n\n" : "";
+                return prev + separator + "--- IMPORTED EXCEL DATA (All Columns) ---" + jsonString;
+          });
+
+        } catch (err) {
+          console.error("Excel parse error", err);
+          alert("Excel 解析失败，请确认文件格式。");
+        }
+      };
+      
+      reader.readAsArrayBuffer(file);
+    }
+  };
+
+  const handleDownloadCleanedExcel = () => {
+    if (!downloadableData || downloadableData.length === 0) return;
+    try {
+        const ws = XLSX.utils.json_to_sheet(downloadableData);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
+        XLSX.writeFile(wb, "imported_social_media_data.xlsx");
+    } catch (e) {
+        alert("下载失败，请重试");
+    }
+  };
+
   const handleFolderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       const files: File[] = Array.from(e.target.files);
@@ -154,9 +262,11 @@ function App() {
   const clearAll = () => {
     if (window.confirm("确定要清空所有文本和图片吗？")) {
       setInputText("");
+      setUserGoal("");
       setImages([]);
       setResult(null);
       setError(null);
+      setDownloadableData(null);
     }
   }
 
@@ -169,7 +279,7 @@ function App() {
     try {
       // Clean input from user prompt artifacts
       const cleanedInput = inputText.replace(/（不要写代码）|\(不要写代码\)/g, "");
-      const data = await analyzeProfile(cleanedInput, images);
+      const data = await analyzeProfile(cleanedInput, images, userGoal);
       setResult(data);
       setStatus(AnalysisStatus.SUCCESS);
     } catch (err) {
@@ -231,13 +341,19 @@ function App() {
                 <div className="flex items-center text-emerald-800 text-sm font-medium">
                   <Database className="w-4 h-4 mr-2" />
                   <span>
-                    检测到 <strong>{dataSummary.noteCount} 篇笔记</strong>，来源：{dataSummary.source}。
+                    检测到 <strong>{dataSummary.noteCount > 0 ? dataSummary.noteCount : '若干'} 条记录</strong>，来源：{dataSummary.source}。
                     {dataSummary.hasMetrics && " 包含互动数据。"}
                   </span>
                 </div>
-                <div className="text-xs text-emerald-600 hidden sm:block">
-                  AI 将分析标题、标签和数据表现。
-                </div>
+                {downloadableData && (
+                    <button 
+                        onClick={handleDownloadCleanedExcel}
+                        className="flex items-center text-xs bg-white text-emerald-700 border border-emerald-200 px-3 py-1 rounded-full shadow-sm hover:bg-emerald-50 transition-colors font-medium"
+                    >
+                        <Download className="w-3 h-3 mr-1" />
+                        下载原始数据副本
+                    </button>
+                )}
               </div>
             )}
 
@@ -245,7 +361,7 @@ function App() {
               <textarea
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
-                placeholder="请描述您的账号，或者使用下方按钮导入 Spider_XHS 的数据文件夹..."
+                placeholder="请粘贴笔记内容，或者描述您的账号现状..."
                 className="w-full h-48 p-6 text-lg text-slate-700 placeholder-slate-400 bg-transparent border-none resize-none focus:ring-0 focus:outline-none font-mono text-sm leading-relaxed"
               />
               
@@ -261,9 +377,24 @@ function App() {
               )}
             </div>
 
+            {/* NEW: User Goal Input */}
+            <div className="px-6 pb-2">
+                <div className="flex items-center space-x-2 mb-2">
+                    <Compass className="w-4 h-4 text-indigo-500" />
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">未来方向 / 预期目标 (Optional)</label>
+                </div>
+                <input 
+                    type="text" 
+                    value={userGoal}
+                    onChange={(e) => setUserGoal(e.target.value)}
+                    placeholder="例如：我想转型做知识博主，或者我想提升变现能力..."
+                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
+                />
+            </div>
+
             {/* Image Preview Area */}
             {images.length > 0 && (
-              <div className="px-6 pb-4 flex flex-wrap gap-4">
+              <div className="px-6 py-4 flex flex-wrap gap-4">
                 {images.map((img, index) => (
                   <div key={index} className="relative group">
                     <img 
@@ -290,7 +421,14 @@ function App() {
                   className="inline-flex items-center px-4 py-2 rounded-xl text-sm font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 hover:text-indigo-600 transition-all shadow-sm"
                 >
                   <ImageIcon className="w-4 h-4 mr-2" />
-                  添加截图
+                  截图
+                </button>
+                <button
+                  onClick={() => excelInputRef.current?.click()}
+                  className="inline-flex items-center px-4 py-2 rounded-xl text-sm font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 hover:text-green-600 transition-all shadow-sm ring-1 ring-green-100"
+                >
+                  <FileSpreadsheet className="w-4 h-4 mr-2" />
+                  导入 Excel
                 </button>
                 <button
                   onClick={() => jsonInputRef.current?.click()}
@@ -301,10 +439,10 @@ function App() {
                 </button>
                 <button
                   onClick={() => folderInputRef.current?.click()}
-                  className="inline-flex items-center px-4 py-2 rounded-xl text-sm font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 hover:text-amber-600 transition-all shadow-sm ring-2 ring-amber-100"
+                  className="inline-flex items-center px-4 py-2 rounded-xl text-sm font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 hover:text-amber-600 transition-all shadow-sm"
                 >
                   <FolderInput className="w-4 h-4 mr-2" />
-                  批量导入文件夹
+                  批量文件夹
                 </button>
                 
                 {/* Hidden Inputs */}
@@ -315,6 +453,13 @@ function App() {
                   className="hidden"
                   accept="image/*"
                   multiple
+                />
+                <input
+                  type="file"
+                  ref={excelInputRef}
+                  onChange={handleExcelChange}
+                  className="hidden"
+                  accept=".xlsx, .xls"
                 />
                  <input
                   type="file"

@@ -11,6 +11,14 @@ export interface HardStats {
   };
 }
 
+export interface PromisingDirection {
+  title: string;
+  description: string;
+  rationale: string;
+  actionPlan: string[];
+  tags: string[]; // New: Add tags for quick context
+}
+
 export interface AnalysisResult {
   summary: string;
   // New: Unique identity tags based on specific content mix
@@ -24,10 +32,20 @@ export interface AnalysisResult {
   // New: Real calculated data
   hardStats?: HardStats;
 
+  // New: The specific "North Star" direction - NOW AN ARRAY
+  promisingDirections?: PromisingDirection[];
+
   strengths: string[];
   weaknesses: string[];
   opportunities: string[];
   
+  // New: Quantifiable SWOT data for charts
+  swotAnalysisStats?: {
+    label: string;
+    score: number; // 0-100
+    color: string;
+  }[];
+
   // Revamped: Actionable templates
   contentStrategy: {
     category: string; // e.g. "沉浸式梦女日常"
@@ -40,6 +58,12 @@ export interface AnalysisResult {
     ageRange: string;
     interests: string[];
     painPoints: string[];
+  };
+
+  // New: Quantifiable Audience data for charts
+  audienceStats?: {
+    ageDistribution: { name: string; value: number }[]; // e.g. "18-24": 60
+    interestComposition: { name: string; value: number; color: string }[];
   };
   
   growthMetrics: {
