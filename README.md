@@ -8,6 +8,16 @@
 ![Stack](https://img.shields.io/badge/React-TypeScript-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
+## 📸 界面展示 (Screenshots)
+
+### 1. 深度诊断与策略生成 (Dashboard & Strategy)
+双轨制“北极星”策略分析，结合用户目标生成的定制化转型路径。
+![Dashboard](assets/dashboard_preview.png)
+
+### 2. 赛道潜力雷达 (Growth Radar)
+基于人设、粘性、变现潜力等 5 个维度的 AI 评分系统。
+![Radar Chart](assets/radar_preview.png)
+
 ## ✨ 核心功能 (Key Features)
 
 - **🧬 创作者 DNA 解析 (Creator DNA Analysis)**
@@ -29,7 +39,7 @@
   - AI Content Generator: Viral title templates and structures based on your DNA.
 
 - **🔌 多源数据导入 (Flexible Data Import)**
-  - 支持 **Spider_XHS** 爬虫数据批量导入。
+  - **Spider_XHS** 爬虫数据批量导入。
   - 支持 Excel 表格、JSON 文件及截图分析。
 
 ## 🛠️ 技术栈 (Tech Stack)
